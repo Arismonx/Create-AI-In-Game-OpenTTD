@@ -2,199 +2,221 @@ import("pathfinder.road", "RoadPathFinder", 3);
 
 class MyNewAI extends AIController {
 	function Start();
+	function FindSpot(center_tile);
+	function FindRoute(towns);
+	function BuildPath(path);
+	function BuildStation(spot);
+	function PickBus();
 }
 
-function MyNewAI::Start() {
+/* Cluster scan: needs 4 flat, buildable tiles in a row along X:
+ * [depot][depot_front][station][station_front]
+ * The search radius grows step by step until a spot is found. */
+function MyNewAI::FindSpot(center_tile) {
+	local cx = AIMap.GetTileX(center_tile);
+	local cy = AIMap.GetTileY(center_tile);
 
-	local max_loan = AICompany.GetMaxLoanAmount();
-    AICompany.SetLoanAmount(max_loan);
+	foreach (radius in [3, 5, 7, 10]) {
+		for (local x = -radius; x <= radius; x++) {
+			for (local y = -radius; y <= radius; y++) {
+				local t = AIMap.GetTileIndex(cx + x, cy + y);
+				if (!AIMap.IsValidTile(t)) continue;
 
-	AILog.Info("Hello OpenTTD!")
-	AICompany.SetName("Tus Transport Co.")
-	this.Sleep(50)
+				local ok = true;
+				for (local i = 0; i < 4; i++) {
+					local n = t + i;
+					if (!AIMap.IsValidTile(n) || AIMap.GetTileY(n) != cy + y ||
+						!AITile.IsBuildable(n) || AITile.GetSlope(n) != AITile.SLOPE_FLAT) {
+						ok = false;
+						break;
+					}
+				}
+				if (ok) {
+					return {depot = t, depot_front = t + 1, station = t + 2, front = t + 3};
+				}
+			}
+		}
+		AILog.Info("No spot within radius " + radius + ", expanding search");
+	}
+	return null;
+}
 
-	/* list  town all  */
-	local townlist = AITownList()
+/* Try town pairs (top-populated first) until a spot pair and a path are found. */
+function MyNewAI::FindRoute(towns) {
+	for (local i = 0; i < towns.len(); i++) {
+		for (local j = i + 1; j < towns.len(); j++) {
+			local a = towns[i];
+			local b = towns[j];
+			AILog.Info("Trying " + AITown.GetName(a) + " -> " + AITown.GetName(b));
 
-	/* Valuate use population in town */
-	townlist.Valuate(AITown.GetPopulation)
-	townlist.Sort(AIList.SORT_BY_VALUE, false);
+			local spot1 = this.FindSpot(AITown.GetLocation(a));
+			if (spot1 == null) { AILog.Warning("No vacant land near " + AITown.GetName(a)); continue; }
+			local spot2 = this.FindSpot(AITown.GetLocation(b));
+			if (spot2 == null) { AILog.Warning("No vacant land near " + AITown.GetName(b)); continue; }
 
-	/* Pick the two towns with the highest population. */
-  	local townid_a = townlist.Begin();
-  	local townid_b = townlist.Next();
+			/* Build stations first so the pathfinder treats them as obstacles. */
+			if (!this.BuildStation(spot1) || !this.BuildStation(spot2)) {
+				AILog.Warning("Station construction failed, trying the next pair");
+				continue;
+			}
 
-	/* Print the names of the towns we'll try to connect. */
-  	AILog.Info("Going to connect " + AITown.GetName(townid_a) + " to " + AITown.GetName(townid_b));
+			local pathfinder = RoadPathFinder();
+			pathfinder.cost.turn = 5000;
+			pathfinder.InitializePath([spot1.front], [spot2.front]);
 
-	/* Tell OpenTTD we want to build normal road (no tram tracks). */
-  	AIRoad.SetCurrentRoadType(AIRoad.ROADTYPE_ROAD);
+			local path = false;
+			local tries = 0;
+			while (path == false && tries < 200) {
+				path = pathfinder.FindPath(100);
+				tries++;
+				this.Sleep(1);
+			}
 
-	// ==========================================
-    // ฟังก์ชันย่อยสำหรับสแกนหาที่ว่างรอบๆ เมือง
-    // ==========================================
+			if (path == false || path == null) {
+				AILog.Warning("No path between these towns, trying the next pair");
+				continue;
+			}
+			return {spot1 = spot1, spot2 = spot2, path = path};
+		}
+	}
+	return null;
+}
 
-	local st1_tile = 0; local st1_front = 0;
-    local st2_tile = 0; local st2_front = 0;
-    local depot_tile = 0; local depot_front = 0;
-
-	// 1. ดึงใจกลางเมือง
-	local town1_tile = AITown.GetLocation(townid_a);
-    local town2_tile = AITown.GetLocation(townid_b);
-
-    AILog.Info("They are scanning the area around the city for vacant land to build the station");
-
-	// 2. ขยับโค้ดสแกนหาที่ดิน (FindSpot) ขึ้นมาไว้ตรงนี้ก่อน
-	local FindSpot = function(center_tile) {
-        // ดึงพิกัด X, Y ของจุดศูนย์กลางออกมาก่อน
-        local center_x = AIMap.GetTileX(center_tile);
-        local center_y = AIMap.GetTileY(center_tile);
-
-        for (local x = -3; x <= 3; x++) {
-            for (local y = -3; y <= 3; y++) {
-                // คำนวณพิกัดใหม่ให้ถูกต้อง
-                local test_tile = AIMap.GetTileIndex(center_x + x, center_y + y);
-                
-                // กันเหนียว: เช็กว่า Tile นั้นไม่ได้อยู่นอกแผนที่
-                if (!AIMap.IsValidTile(test_tile)) continue; 
-
-                local test_front = test_tile - 1; 
-                
-                if (AITile.IsBuildable(test_tile) && AITile.IsBuildable(test_front)) {
-                    return [test_tile, test_front];
-                }
-            }
-        }
-        return null; 
-    };
-
-    // เอาฟังก์ชันไปลองหารอบๆ เมือง 1
-    local spot1 = FindSpot(town1_tile);
-    if (spot1 != null) {
-        st1_tile = spot1[0];
-        st1_front = spot1[1];
-    } else {
-        AILog.Error("Can't find an empty plot of land to build the first city sign!");
-    }
-
-    // เอาฟังก์ชันไปลองหารอบๆ เมือง 2
-    local spot2 = FindSpot(town2_tile);
-    if (spot2 != null) {
-        st2_tile = spot2[0];
-        st2_front = spot2[1];
-    }
-
-    // สร้างอู่รถใกล้ๆ ป้ายเมือง 1 (ขยับไปอีกนิด)
-    depot_tile = st1_tile + 2; 
-    depot_front = depot_tile - 1;
-
-
-	// 3. ปรับให้ A* เริ่มต้นที่ "หน้าป้ายรถเมล์" แทนใจกลางเมือง
-	/* Create an instance of the pathfinder. */
-  	local pathfinder = RoadPathFinder();
-
-	/* Set the cost for making a turn extreme high. */
-  	pathfinder.cost.turn = 5000;
-
-	/* Give the source and goal tiles to the pathfinder. */
-  	pathfinder.InitializePath([st1_front], [st2_front]);
-
-	local path = false;
- 	while (path == false) {
-    	path = pathfinder.FindPath(100);
-    	this.Sleep(1);
-  	}
-
-	if (path == null) {
-    /* No path was found. */
-    	AILog.Error("pathfinder.FindPath return null");
-  	}
-
-	  /* If a path was found, build a road over it. */
+function MyNewAI::BuildPath(path) {
 	while (path != null) {
 		local par = path.GetParent();
 		if (par != null) {
-		local last_node = path.GetTile();
-		if (AIMap.DistanceManhattan(path.GetTile(), par.GetTile()) == 1 ) {
-			if (!AIRoad.BuildRoad(path.GetTile(), par.GetTile())) {
-			/* An error occured while building a piece of road. TODO: handle it. 
-			* Note that is can also be the case that the road was already build. */
-			}
-		} else {
-			/* Build a bridge or tunnel. */
-			if (!AIBridge.IsBridgeTile(path.GetTile()) && !AITunnel.IsTunnelTile(path.GetTile())) {
-			/* If it was a road tile, demolish it first. Do this to work around expended roadbits. */
-			if (AIRoad.IsRoadTile(path.GetTile())) AITile.DemolishTile(path.GetTile());
-			if (AITunnel.GetOtherTunnelEnd(path.GetTile()) == par.GetTile()) {
-				if (!AITunnel.BuildTunnel(AIVehicle.VT_ROAD, path.GetTile())) {
-				/* An error occured while building a tunnel. TODO: handle it. */
+			if (AIMap.DistanceManhattan(path.GetTile(), par.GetTile()) == 1) {
+				if (!AIRoad.BuildRoad(path.GetTile(), par.GetTile())) {
+					/* May also just mean the road already exists. */
+					local err = AIError.GetLastError();
+					if (err != AIError.ERR_ALREADY_BUILT) {
+						AILog.Warning("BuildRoad failed: " + AIError.GetLastErrorString());
+					}
 				}
-			} else {
-				local bridge_list = AIBridgeList_Length(AIMap.DistanceManhattan(path.GetTile(), par.GetTile()) + 1);
-				bridge_list.Valuate(AIBridge.GetMaxSpeed);
-				bridge_list.Sort(AIList.SORT_BY_VALUE, false);
-				if (!AIBridge.BuildBridge(AIVehicle.VT_ROAD, bridge_list.Begin(), path.GetTile(), par.GetTile())) {
-				/* An error occured while building a bridge. TODO: handle it. */
+			} else if (!AIBridge.IsBridgeTile(path.GetTile()) && !AITunnel.IsTunnelTile(path.GetTile())) {
+				if (AIRoad.IsRoadTile(path.GetTile())) AITile.DemolishTile(path.GetTile());
+				if (AITunnel.GetOtherTunnelEnd(path.GetTile()) == par.GetTile()) {
+					if (!AITunnel.BuildTunnel(AIVehicle.VT_ROAD, path.GetTile())) {
+						AILog.Warning("BuildTunnel failed: " + AIError.GetLastErrorString());
+						return false;
+					}
+				} else {
+					local bridge_list = AIBridgeList_Length(AIMap.DistanceManhattan(path.GetTile(), par.GetTile()) + 1);
+					bridge_list.Valuate(AIBridge.GetMaxSpeed);
+					bridge_list.Sort(AIList.SORT_BY_VALUE, false);
+					if (!AIBridge.BuildBridge(AIVehicle.VT_ROAD, bridge_list.Begin(), path.GetTile(), par.GetTile())) {
+						AILog.Warning("BuildBridge failed: " + AIError.GetLastErrorString());
+						return false;
+					}
 				}
 			}
-			}
-		}
 		}
 		path = par;
 	}
+	return true;
+}
 
-	// ==============================================================
-	// 4. สร้างสถานี อู่รถ และซื้อรถ (เอาไว้ล่างสุด)
+/* Builds the drive-through station and the depot next to it. */
+function MyNewAI::BuildStation(spot) {
+	if (!AIRoad.BuildDriveThroughRoadStation(spot.station, spot.front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW)) {
+		AILog.Error("Station construction failed: " + AIError.GetLastErrorString());
+		return false;
+	}
+	if (!AIRoad.BuildRoadDepot(spot.depot, spot.depot_front)) {
+		AILog.Error("Depot construction failed: " + AIError.GetLastErrorString());
+		return false;
+	}
+	/* The depot only faces depot_front; the road bit toward it must be built explicitly. */
+	if (!AIRoad.BuildRoad(spot.depot_front, spot.depot)) {
+		if (AIError.GetLastError() != AIError.ERR_ALREADY_BUILT) {
+			AILog.Error("Depot entrance road failed: " + AIError.GetLastErrorString());
+			return false;
+		}
+	}
+	/* Road bit from the front tile into the station (the pathfinder only builds along its route). */
+	if (!AIRoad.BuildRoad(spot.station, spot.front)) {
+		if (AIError.GetLastError() != AIError.ERR_ALREADY_BUILT) {
+			AILog.Error("Station front road failed: " + AIError.GetLastErrorString());
+			return false;
+		}
+	}
+	/* Link depot front to the station tile. */
+	if (!AIRoad.BuildRoad(spot.depot_front, spot.station)) {
+		if (AIError.GetLastError() != AIError.ERR_ALREADY_BUILT) {
+			AILog.Error("Depot road failed: " + AIError.GetLastErrorString());
+			return false;
+		}
+	}
+	return true;
+}
 
-	AILog.Info("1. Construction of the bus stop and bus depot has begun.");
-    
-    // สร้างป้ายที่ 1 และดึงรหัสสถานีเก็บไว้
-    AIRoad.BuildRoadStation(st1_tile, st1_front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW);
-    local st1_id = AIStation.GetStationID(st1_tile);
+function MyNewAI::PickBus() {
+	local pass = null;
+	local cargos = AICargoList();
+	foreach (c, _ in cargos) {
+		if (AICargo.HasCargoClass(c, AICargo.CC_PASSENGERS)) { pass = c; break; }
+	}
+	if (pass == null) return null;
 
-    // สร้างป้ายที่ 2 และดึงรหัสสถานีเก็บไว้
-    AIRoad.BuildRoadStation(st2_tile, st2_front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW);
-    local st2_id = AIStation.GetStationID(st2_tile);
+	local engines = AIEngineList(AIVehicle.VT_ROAD);
+	engines.Valuate(AIEngine.GetCargoType);
+	engines.KeepValue(pass);
+	engines.Valuate(AIEngine.GetMaxSpeed);
+	engines.Sort(AIList.SORT_BY_VALUE, false);
+	if (engines.Count() == 0) return null;
+	return engines.Begin();
+}
 
+function MyNewAI::Start() {
+	AICompany.SetLoanAmount(AICompany.GetMaxLoanAmount());
+	AICompany.SetName("Tus Transport Co.");
+	AILog.Info("Hello OpenTTD!");
+	this.Sleep(50);
 
-    // สร้างอู่รถ (ต้องสร้างติดถนน ไม่งั้นรถขับออกมาไม่ได้)
-    AIRoad.BuildRoadDepot(depot_tile, depot_front);
-	AIRoad.BuildRoad(depot_front, st1_front); // สร้างถนนจิ๋ว 1 ช่อง เชื่อมหน้าอู่เข้าหน้าป้าย
+	AIRoad.SetCurrentRoadType(AIRoad.ROADTYPE_ROAD);
 
-    AILog.Info("2. Currently selecting a bus from the catalog.");
-    
-    // ดึงรายชื่อรถทั้งหมดที่เป็นรถถนน (ไม่เอารถไฟ/เรือ)
-    local engines = AIEngineList(AIVehicle.VT_ROAD);
-    
-    // กรองเอาเฉพาะ "รถที่บรรทุกผู้โดยสารได้" 
-    engines.Valuate(AIEngine.GetCargoType); 
-    engines.KeepValue(0); //(0 คือรหัสสินค้าประเภทผู้โดยสาร)
-    
-    // จัดเรียงตามความเร็วสูงสุด แล้วดึงคันที่เร็วที่สุดมาใช้
-    engines.Valuate(AIEngine.GetMaxSpeed);
-    engines.Sort(AIList.SORT_BY_VALUE, false);
-    local best_bus = engines.Begin();
+	/* Take the 5 most populated towns as candidates. */
+	local townlist = AITownList();
+	townlist.Valuate(AITown.GetPopulation);
+	townlist.Sort(AIList.SORT_BY_VALUE, false);
+	local towns = [];
+	foreach (t, _ in townlist) {
+		towns.append(t);
+		if (towns.len() >= 5) break;
+	}
 
-    AILog.Info("3. Order vehicles and issue work orders.");
-    
-    // ซื้อรถที่อู่ที่เราสร้างไว้
-    local bus_id = AIVehicle.BuildVehicle(depot_tile, best_bus);
+	local route = this.FindRoute(towns);
+	if (route == null) {
+		AILog.Error("No usable route found between any towns, stopping.");
+		return;
+	}
 
-    if (AIVehicle.IsValidVehicle(bus_id)) {
-        // แจกคิวงานให้รถ 
-        AIOrder.AppendOrder(bus_id, st1_tile, AIOrder.OF_NONE);
-        AIOrder.AppendOrder(bus_id, st2_tile, AIOrder.OF_NONE);
-        
-        // สตาร์ทเครื่อง
-        AIVehicle.StartStopVehicle(bus_id);
-        AILog.Info("The first bus has started running and generating revenue!");
-    } else {
-        AILog.Error("Car purchase unsuccessful: " + AIError.GetLastErrorString());
-    }
+	if (!this.BuildPath(route.path)) {
+		AILog.Error("Road construction failed, stopping.");
+		return;
+	}
 
+	AILog.Info("1. Selecting a bus.");
+	local bus = this.PickBus();
+	if (bus == null) {
+		AILog.Error("No passenger road vehicle available, stopping.");
+		return;
+	}
 
+	AILog.Info("2. Buying vehicle and issuing orders.");
+	local bus_id = AIVehicle.BuildVehicle(route.spot1.depot, bus);
+	if (!AIVehicle.IsValidVehicle(bus_id)) {
+		AILog.Error("Car purchase unsuccessful: " + AIError.GetLastErrorString());
+		return;
+	}
 
-	/* Main */
+	/* Orders take tile indexes, not station ids. */
+	AIOrder.AppendOrder(bus_id, route.spot1.station, AIOrder.OF_NONE);
+	AIOrder.AppendOrder(bus_id, route.spot2.station, AIOrder.OF_NONE);
+	AIVehicle.StartStopVehicle(bus_id);
+	AILog.Info("The first bus has started running!");
+
 	while (true) {
 		this.Sleep(100);
 	}
