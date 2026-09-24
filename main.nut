@@ -74,15 +74,19 @@ function MyNewAI::Start() {
         st1_tile = spot1[0];
         st1_front = spot1[1];
     } else {
-        AILog.Error("Can't find an empty plot of land to build the first city sign!");
-    }
+        AILog.Error("Can't find an empty plot of land to build the first city sign! (1)");
+		return;
+	}
 
     // เอาฟังก์ชันไปลองหารอบๆ เมือง 2
     local spot2 = FindSpot(town2_tile);
     if (spot2 != null) {
         st2_tile = spot2[0];
         st2_front = spot2[1];
-    }
+    }else {
+        AILog.Error("Can't find an empty plot of land to build the first city sign! (2)");
+		return;
+	}
 
     // สร้างอู่รถใกล้ๆ ป้ายเมือง 1 (ขยับไปอีกนิด)
     depot_tile = st1_tile + 2; 
@@ -149,8 +153,22 @@ function MyNewAI::Start() {
 	AILog.Info("1. Construction of the bus stop and bus depot has begun.");
     
     // สร้างป้ายที่ 1 และดึงรหัสสถานีเก็บไว้
-    AIRoad.BuildDriveThroughRoadStation(st1_tile, st1_front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW);
-    local st1_id = AIStation.GetStationID(st1_tile);
+    // AIRoad.BuildDriveThroughRoadStation(st1_tile, st1_front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW);
+    // local st1_id = AIStation.GetStationID(st1_tile);
+	if (st2_tile == 0) {
+        AILog.Error("One stations were built because FindSpot initially failed to find any vacant land around the city!");
+    } else {
+        // ลองสั่งสร้างป้ายแบบคร่อมถนน (Drive-through) และเอาตัวแปรมารับผลลัพธ์
+        local build_st1 = AIRoad.BuildDriveThroughRoadStation(st1_tile, st1_front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW);
+        
+        if (!build_st1) {
+            // ถ้าสร้างไม่สำเร็จ ให้ดึงข้อความแจ้งเตือนจากระบบเกมมาแสดง
+            AILog.Error("Station 1 construction failed! Reason: " + AIError.GetLastErrorString());
+        } else {
+            local st1_id = AIStation.GetStationID(st1_tile);
+            AILog.Info("Station 1 successfully built!");
+        }
+    }
 
     // สร้างป้ายที่ 2 และดึงรหัสสถานีเก็บไว้
     // AIRoad.BuildDriveThroughRoadStation(st2_tile, st2_front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW);
