@@ -149,13 +149,27 @@ function MyNewAI::Start() {
 	AILog.Info("1. Construction of the bus stop and bus depot has begun.");
     
     // สร้างป้ายที่ 1 และดึงรหัสสถานีเก็บไว้
-    AIRoad.BuildRoadStation(st1_tile, st1_front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW);
+    AIRoad.BuildDriveThroughRoadStation(st1_tile, st1_front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW);
     local st1_id = AIStation.GetStationID(st1_tile);
 
     // สร้างป้ายที่ 2 และดึงรหัสสถานีเก็บไว้
-    AIRoad.BuildRoadStation(st2_tile, st2_front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW);
-    local st2_id = AIStation.GetStationID(st2_tile);
+    // AIRoad.BuildDriveThroughRoadStation(st2_tile, st2_front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW);
+    // local st2_id = AIStation.GetStationID(st2_tile);
 
+	if (st2_tile == 0) {
+        AILog.Error("Two stations were built because FindSpot initially failed to find any vacant land around the city!");
+    } else {
+        // ลองสั่งสร้างป้ายแบบคร่อมถนน (Drive-through) และเอาตัวแปรมารับผลลัพธ์
+        local build_st2 = AIRoad.BuildDriveThroughRoadStation(st2_tile, st2_front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW);
+        
+        if (!build_st2) {
+            // ถ้าสร้างไม่สำเร็จ ให้ดึงข้อความแจ้งเตือนจากระบบเกมมาแสดง
+            AILog.Error("Station 2 construction failed! Reason: " + AIError.GetLastErrorString());
+        } else {
+            local st2_id = AIStation.GetStationID(st2_tile);
+            AILog.Info("Station 2 successfully built!");
+        }
+    }
 
     // สร้างอู่รถ (ต้องสร้างติดถนน ไม่งั้นรถขับออกมาไม่ได้)
     AIRoad.BuildRoadDepot(depot_tile, depot_front);
