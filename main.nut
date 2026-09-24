@@ -5,6 +5,10 @@ class MyNewAI extends AIController {
 }
 
 function MyNewAI::Start() {
+
+	local max_loan = AICompany.GetMaxLoanAmount();
+    AICompany.SetLoanAmount(max_loan);
+
 	AILog.Info("Hello OpenTTD!")
 	AICompany.SetName("MyNewAI")
 	this.Sleep(50)
@@ -68,7 +72,7 @@ function MyNewAI::Start() {
 			} else {
 				local bridge_list = AIBridgeList_Length(AIMap.DistanceManhattan(path.GetTile(), par.GetTile()) + 1);
 				bridge_list.Valuate(AIBridge.GetMaxSpeed);
-				bridge_list.Sort(AIAbstractList.SORT_BY_VALUE, false);
+				bridge_list.Sort(AIList.SORT_BY_VALUE, false);
 				if (!AIBridge.BuildBridge(AIVehicle.VT_ROAD, bridge_list.Begin(), path.GetTile(), par.GetTile())) {
 				/* An error occured while building a bridge. TODO: handle it. */
 				}
@@ -78,14 +82,110 @@ function MyNewAI::Start() {
 		}
 		path = par;
 	}
-	/* loop list */
-	// for (local town_id = townlist.Begin(); !townlist.IsEnd(); town_id = townlist.Next()) {
-	// 	local name = AITown.GetName(town_id)
-	// 	local population = townlist.GetValue(town_id)
+	// ==========================================
+    // ฟังก์ชันย่อยสำหรับสแกนหาที่ว่างรอบๆ เมือง
+    // ==========================================
+    // เราจะเขียนลอจิกวนลูปรอบๆ ใจกลางเมืองเป็นรัศมี 5x5 ช่อง
+    // เพื่อหาช่องว่างที่ 1. สร้างสถานีได้ 2. สร้างถนนติดสถานีได้
+    
+    // (สมมติว่ามีตัวแปร town1_tile และ town2_tile ที่ดึงมาจาก AITown แล้ว)
+    local st1_tile = 0; local st1_front = 0;
+    local st2_tile = 0; local st2_front = 0;
+    local depot_tile = 0; local depot_front = 0;
 
-	// 	AILog.Info("Town: " + name + "(Population: " + population + ")")
-	// }
-	// AILog.Info("End loop!")
+	local town1_tile = AITown.GetLocation(townid_a);
+    local town2_tile = AITown.GetLocation(townid_b);
+
+    AILog.Info("They are scanning the area around the city for vacant land to build the station");
+
+	local FindSpot = function(center_tile) {
+        // แก้จุดที่ 2: ดึงพิกัด X, Y ของจุดศูนย์กลางออกมาก่อน
+        local center_x = AIMap.GetTileX(center_tile);
+        local center_y = AIMap.GetTileY(center_tile);
+
+        for (local x = -3; x <= 3; x++) {
+            for (local y = -3; y <= 3; y++) {
+                // คำนวณพิกัดใหม่ให้ถูกต้อง
+                local test_tile = AIMap.GetTileIndex(center_x + x, center_y + y);
+                
+                // กันเหนียว: เช็กว่า Tile นั้นไม่ได้อยู่นอกแผนที่
+                if (!AIMap.IsValidTile(test_tile)) continue; 
+
+                local test_front = test_tile - 1; 
+                
+                if (AITile.IsBuildable(test_tile) && AITile.IsBuildable(test_front)) {
+                    return [test_tile, test_front];
+                }
+            }
+        }
+        return null; 
+    };
+
+    // เอาฟังก์ชันไปลองหารอบๆ เมือง 1
+    local spot1 = FindSpot(town1_tile);
+    if (spot1 != null) {
+        st1_tile = spot1[0];
+        st1_front = spot1[1];
+    } else {
+        AILog.Error("Can't find an empty plot of land to build the first city sign!");
+    }
+
+    // เอาฟังก์ชันไปลองหารอบๆ เมือง 2
+    local spot2 = FindSpot(town2_tile);
+    if (spot2 != null) {
+        st2_tile = spot2[0];
+        st2_front = spot2[1];
+    }
+
+    // สร้างอู่รถใกล้ๆ ป้ายเมือง 1 (ขยับไปอีกนิด)
+    depot_tile = st1_tile + 2; 
+    depot_front = depot_tile - 1;
+
+
+	// ==============================================================
+	AILog.Info("1. Construction of the bus stop and bus depot has begun.");
+    
+    // สร้างป้ายที่ 1 และดึงรหัสสถานีเก็บไว้
+    AIRoad.BuildRoadStation(st1_tile, st1_front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW);
+    local st1_id = AIStation.GetStationID(st1_tile);
+
+    // สร้างป้ายที่ 2 และดึงรหัสสถานีเก็บไว้
+    AIRoad.BuildRoadStation(st2_tile, st2_front, AIRoad.ROADVEHTYPE_BUS, AIStation.STATION_NEW);
+    local st2_id = AIStation.GetStationID(st2_tile);
+
+    // สร้างอู่รถ (ต้องสร้างติดถนน ไม่งั้นรถขับออกมาไม่ได้)
+    AIRoad.BuildRoadDepot(depot_tile, depot_front);
+
+    AILog.Info("2. Currently selecting a bus from the catalog.");
+    
+    // ดึงรายชื่อรถทั้งหมดที่เป็นรถถนน (ไม่เอารถไฟ/เรือ)
+    local engines = AIEngineList(AIVehicle.VT_ROAD);
+    
+    // กรองเอาเฉพาะ "รถที่บรรทุกผู้โดยสารได้" (0 คือรหัสสินค้าประเภทผู้โดยสาร)
+    engines.Valuate(AIEngine.GetCargoType); 
+    engines.KeepValue(0); // เก็บเฉพาะคันที่ได้ค่า 1 (True)
+    
+    // จัดเรียงตามความเร็วสูงสุด แล้วดึงคันที่เร็วที่สุดมาใช้
+    engines.Valuate(AIEngine.GetMaxSpeed);
+    engines.Sort(AIList.SORT_BY_VALUE, false);
+    local best_bus = engines.Begin();
+
+    AILog.Info("3. Order vehicles and issue work orders.");
+    
+    // ซื้อรถที่อู่ที่เราสร้างไว้
+    local bus_id = AIVehicle.BuildVehicle(depot_tile, best_bus);
+
+    if (AIVehicle.IsValidVehicle(bus_id)) {
+        // แจกคิวงานให้รถ (ต้องใช้ Station ID ไม่ใช่พิกัด)
+        AIOrder.AppendOrder(bus_id, st1_id, AIOrder.OF_NONE);
+        AIOrder.AppendOrder(bus_id, st2_id, AIOrder.OF_NONE);
+        
+        // สตาร์ทเครื่อง
+        AIVehicle.StartStopVehicle(bus_id);
+        AILog.Info("The first bus has started running and generating revenue!");
+    } else {
+        AILog.Error("Car purchase unsuccessful: " + AIError.GetLastErrorString());
+    }
 
 
 
